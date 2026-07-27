@@ -33,6 +33,9 @@ voices/*.flac
 # Rendered voice previews
 samples/
 
+# Runtime / build output
+target/
+
 # OS
 Thumbs.db
 .DS_Store
