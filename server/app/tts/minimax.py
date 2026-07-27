@@ -42,6 +42,10 @@ VOICE_IDLE_EXPIRY_DAYS = 7
 class MiniMaxTts(TtsBackend):
     sample_rate = 24_000
     supports_emotion = True
+    # fal.ai fronts this with a stateless HTTP API, so two chunks can render at
+    # once: chunk k+1 synthesises while chunk k plays, closing the inter-sentence
+    # gap that a single in-flight request leaves on a ~2-5s backend.
+    concurrency = 2
 
     def __init__(
         self,
@@ -82,20 +86,28 @@ class MiniMaxTts(TtsBackend):
             return np.zeros(0, dtype=np.float32)
 
         spec = EMOTIONS.get(emotion or "")
+        # `voice` is ignored unless it is a real MiniMax id. TTS_VOICE and the
+        # persona's `voice:` field carry backend-specific names (Kokoro's
+        # zf_001, or the placeholder "cloned"), and forwarding one of those
+        # gets a 422 "Voice with id ... does not exist".
+        voice_id = voice if voice.startswith("Voice") else self._voice_id
         response = self._client.post(
             f"{_QUEUE_HOST}/{self._model}",
             json={
                 "text": text,
                 "voice_setting": {
-                    "voice_id": voice or self._voice_id,
+                    "voice_id": voice_id,
                     "speed": speed or self._speed,
                     "vol": 1.0,
                     "pitch": 0,
                     "emotion": spec.minimax if spec else "neutral",
                 },
-                # PCM rather than mp3: no encoder delay, so chunk boundaries
-                # line up exactly with the subtitle timing.
-                "audio_setting": {"sample_rate": 24000, "format": "pcm"},
+                # mp3, not pcm. Measured: 36KB vs 86KB per chunk and ~370ms
+                # faster to fetch, which is ~10% off a turn. The reason PCM was
+                # here originally -- avoiding encoder delay at chunk boundaries
+                # -- costs about 10ms, well under perception, and playback
+                # timing is derived from the decoded sample count anyway.
+                "audio_setting": {"sample_rate": 24000, "format": "mp3", "bitrate": 128000},
             },
         )
         if response.status_code != 200:

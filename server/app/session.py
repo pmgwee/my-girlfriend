@@ -47,10 +47,10 @@ class Stages:
     llm: LlmClient
     persona: Persona
     settings: Settings
-    # Whisper and TTS are not guaranteed thread-safe, and with one user there is
-    # no throughput to gain from parallelism anyway.
+    # Whisper is not thread-safe and stays serialised on this lock. TTS
+    # concurrency is governed per backend by TtsBackend.concurrency instead --
+    # stateless HTTP backends render multiple chunks at once, ONNX ones do not.
     stt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    tts_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class Session:
@@ -72,6 +72,11 @@ class Session:
         self._response: asyncio.Task | None = None
         self._chunk_id = 0
         self._speaking = False
+        # Monotonic turn id. Bumped at the start of every turn and on every
+        # barge-in; synthesis results carry the epoch they were started under and
+        # are discarded if it has moved on, so a chunk rendered across an
+        # interrupt can never reach the speaker.
+        self._epoch = 0
 
     # ------------------------------------------------------------------ audio
 
@@ -95,6 +100,9 @@ class Session:
         await self._send({"type": "interrupted"})
 
     async def _cancel_response(self) -> None:
+        # Invalidate the outgoing turn so synthesis still finishing in the thread
+        # pool is discarded rather than spoken after the interrupt lands.
+        self._epoch += 1
         task, self._response = self._response, None
         if task and not task.done():
             task.cancel()
@@ -148,6 +156,32 @@ class Session:
         # whole reply, so it's carried forward across subsequent chunks.
         mood: str | None = None
 
+        epoch = self._bump_epoch()
+        # How many chunks may render at once. With a stateless HTTP backend this
+        # is >1, so chunk k+1 synthesises *while* chunk k plays -- that overlap
+        # is what removes the silence between sentences on a high-latency hosted
+        # TTS. Kokoro's ONNX runtime is not re-entrant, so it stays at 1 and this
+        # loop degenerates to the original one-chunk-at-a-time path.
+        concurrency = max(1, getattr(self._stages.tts, "concurrency", 1))
+        limit = asyncio.Semaphore(concurrency)
+        pending: list[asyncio.Task] = []
+
+        async def synth(chunk_text: str, chunk_mood: str | None):
+            async with limit:
+                samples = await asyncio.to_thread(
+                    self._stages.tts.synthesize,
+                    chunk_text,
+                    self._settings.tts_voice,
+                    self._settings.tts_speed,
+                    chunk_mood,
+                )
+            # A barge-in bumps the epoch; anything rendered after that is stale
+            # and must never reach the speaker, or she'd bleat a fragment after
+            # you'd already cut her off.
+            if self._epoch != epoch or samples.size == 0:
+                return None
+            return samples, self._stages.tts.sample_rate, chunk_text
+
         try:
             self._speaking = True
             async for chunk in self._stages.llm.stream(self._conversation.messages()):
@@ -162,16 +196,46 @@ class Session:
                     "emotion": mood or emotion.DEFAULT,
                 })
                 spoken.append(chunk)
-                await self._speak(chunk, mood)
-                if first_audio is None:
-                    first_audio = time.perf_counter() - started
+                # Backpressure: keep the LLM from running far ahead of synthesis.
+                # Allow at most `concurrency` chunks buffered beyond the one
+                # emitting, so a long reply can't pile up many chunks (and their
+                # audio) in memory. TTFA is unaffected -- the queue starts empty,
+                # so the first sentence still flushes immediately.
+                while len(pending) > concurrency:
+                    result = await pending.pop(0)
+                    if result is not None:
+                        await self._emit(result, epoch)
+                        if first_audio is None:
+                            first_audio = time.perf_counter() - started
+                pending.append(asyncio.create_task(synth(chunk, mood)))
+
+                # Emit anything that is both finished and at the front of the
+                # queue, so audio always reaches the client in the order she said
+                # it even when synthesis completes out of order.
+                while pending and pending[0].done():
+                    result = await pending.pop(0)
+                    if result is not None:
+                        await self._emit(result, epoch)
+                        if first_audio is None:
+                            first_audio = time.perf_counter() - started
+
+            # Drain whatever is still rendering once the LLM stream ends.
+            for task in pending:
+                result = await task
+                if result is not None:
+                    await self._emit(result, epoch)
+                    if first_audio is None:
+                        first_audio = time.perf_counter() - started
 
             await self._send({"type": "turn_end", "reason": "complete"})
             if first_audio is not None:
                 log.info("time-to-first-audio %.0fms", first_audio * 1000)
         except asyncio.CancelledError:
-            # She was cut off. Record what she actually got out so the next reply
-            # continues the thought instead of restarting it.
+            # She was cut off. Cancel pending synthesis; the epoch guard also
+            # drops any thread-pool result that lands after this. What she
+            # already said is recorded so the next reply continues, not restarts.
+            for task in pending:
+                task.cancel()
             log.debug("response cancelled after %d chunks", len(spoken))
             raise
         except Exception as exc:  # noqa: BLE001
@@ -198,7 +262,10 @@ class Session:
     # ------------------------------------------------------------------ output
 
     async def _speak(self, text: str, mood: str | None = None) -> None:
-        async with self._stages.tts_lock:
+        """Synthesise one fixed chunk and send it. Used by the greeting path,
+        which has a single utterance and no pipelining to do."""
+        epoch = self._bump_epoch()
+        try:
             samples = await asyncio.to_thread(
                 self._stages.tts.synthesize,
                 text,
@@ -206,13 +273,22 @@ class Session:
                 self._settings.tts_speed,
                 mood,
             )
-        if samples.size == 0:
+        except asyncio.CancelledError:
+            raise
+        if samples.size == 0 or self._epoch != epoch:
+            return
+        await self._emit((samples, self._stages.tts.sample_rate, text), epoch)
+
+    async def _emit(self, result: tuple[np.ndarray, int, str], epoch: int) -> None:
+        """Slice one synthesised chunk into ~120ms pieces and queue them, in
+        order. The epoch guard keeps a stale chunk -- one rendered across a
+        barge-in -- from ever reaching the speaker."""
+        samples, rate, text = result
+        if self._epoch != epoch:
             return
 
-        rate = self._stages.tts.sample_rate
         self._chunk_id += 1
         chunk_id = self._chunk_id
-
         await self._send({
             "type": "audio_start",
             "chunkId": chunk_id,
@@ -227,9 +303,17 @@ class Session:
             # A cancellation between slices is the common barge-in path; this
             # yield gives the event loop a chance to deliver it.
             await asyncio.sleep(0)
+            if self._epoch != epoch:
+                return
             await self._send(float32_to_pcm16(piece))
 
+        if self._epoch != epoch:
+            return
         await self._send({"type": "audio_end", "chunkId": chunk_id})
+
+    def _bump_epoch(self) -> int:
+        self._epoch += 1
+        return self._epoch
 
     # ------------------------------------------------------------------ misc
 

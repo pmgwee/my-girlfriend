@@ -134,6 +134,15 @@ class Settings(BaseSettings):
     qwen3_device: str = "cuda"
     qwen3_dtype: str = "bfloat16"
 
+    # ---------------- MiniMax via Replicate ----------------
+    # Half fal.ai's price and billed to a card rather than a prepaid balance.
+    replicate_api_token: str = ""
+    # Written by scripts\clone_voice_replicate.ps1.
+    replicate_voice_id: str = ""
+    # Verified against the account with scripts\check_replicate.ps1 -- Replicate
+    # does not host every MiniMax revision fal does.
+    replicate_model: str = "minimax/speech-02-hd"
+
     # ---------------- MiniMax via fal.ai ----------------
     fal_key: str = ""
     # Written by scripts\register_voice.ps1 after cloning.

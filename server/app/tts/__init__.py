@@ -30,6 +30,15 @@ def build_tts(settings: Settings) -> TtsBackend:
 def _construct(backend: str, settings: Settings) -> TtsBackend:
     models = settings.models_dir
 
+    if backend == "replicate":
+        from .replicate_tts import ReplicateTts
+
+        return ReplicateTts(
+            api_token=settings.replicate_api_token,
+            voice_id=settings.replicate_voice_id,
+            model=settings.replicate_model,
+        )
+
     if backend == "minimax":
         from .minimax import MiniMaxTts
 

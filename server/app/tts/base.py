@@ -29,6 +29,15 @@ class TtsBackend(abc.ABC):
     #: MiniMax and CosyVoice 2 do both.
     supports_emotion: bool = False
 
+    #: How many synthesis calls the orchestrator may run at once. Stateful or
+    #: non-re-entrant runtimes (ONNX, a single GPU context) stay at 1 so calls
+    #: serialise; stateless HTTP backends can raise it to overlap one chunk's
+    #: synthesis with the previous chunk's playback. That overlap is what removes
+    #: the silence between sentences on a high-latency hosted backend -- without
+    #: it, chunk k+1 cannot start rendering until chunk k finishes, so after a
+    #: short first sentence the listener waits in silence for the next synthesis.
+    concurrency: int = 1
+
     @abc.abstractmethod
     def synthesize(
         self, text: str, voice: str, speed: float, emotion: str | None = None
