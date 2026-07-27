@@ -56,6 +56,7 @@ class SileroVad:
         silence_ms: int,
         min_speech_ms: int,
         prefix_ms: int,
+        max_speech_ms: int = 20_000,
     ) -> None:
         if not model_path.exists():
             raise FileNotFoundError(
@@ -80,13 +81,27 @@ class SileroVad:
         self._reset_state()
 
         self.threshold = threshold
-        # Hysteresis: once speech is detected we require a clearly lower
-        # probability to call it silence, so trailing consonants don't end a turn.
-        self.exit_threshold = max(0.15, threshold - 0.25)
+        # Hysteresis: once speech is detected we require a lower probability to
+        # call it silence, so trailing consonants don't end a turn early.
+        #
+        # The floor here matters more than it looks. Silero's output is roughly
+        # bimodal -- clear speech >0.9, digital silence <0.01 -- but a real room
+        # picked up by a real microphone sits somewhere in between. An earlier
+        # floor of 0.15 was below that noise level, so once a turn started it
+        # never ended: the silence run kept resetting and the user waited tens of
+        # seconds for a reply. Synthetic test audio never caught it because
+        # zero-padding scores ~0.001.
+        self.exit_threshold = max(0.25, threshold * 0.6)
 
-        self._silence_frames_needed = max(1, silence_ms // (FRAME_SAMPLES * 1000 // SAMPLE_RATE))
-        self._min_speech_frames = max(1, min_speech_ms // (FRAME_SAMPLES * 1000 // SAMPLE_RATE))
-        prefix_frames = max(1, prefix_ms // (FRAME_SAMPLES * 1000 // SAMPLE_RATE))
+        frame_ms = FRAME_SAMPLES * 1000 // SAMPLE_RATE
+        self._silence_frames_needed = max(1, silence_ms // frame_ms)
+        self._min_speech_frames = max(1, min_speech_ms // frame_ms)
+        # Hard ceiling on a single turn. Whatever the threshold tuning, a turn
+        # must always end -- a mains hum or a fan that parks the probability
+        # above exit_threshold would otherwise hold the pipeline open forever,
+        # which reads to the user as "she stopped responding".
+        self._max_speech_frames = max(1, max_speech_ms // frame_ms)
+        prefix_frames = max(1, prefix_ms // frame_ms)
 
         self._triggered = False
         self._silence_run = 0
@@ -161,6 +176,18 @@ class SileroVad:
         if prob >= self.exit_threshold:
             self._speech_frames += 1
             self._silence_run = 0
+            # Safety valve. If noise holds the probability up, end the turn here
+            # rather than listening indefinitely -- a truncated question still
+            # gets an answer, whereas a hung turn looks like the app has died.
+            if len(self._utterance) >= self._max_speech_frames:
+                captured = np.concatenate(self._utterance)
+                log.warning(
+                    "turn hit the %.0fs ceiling with P=%.2f still above exit "
+                    "threshold %.2f -- raise VAD_THRESHOLD if this repeats",
+                    captured.size / SAMPLE_RATE, prob, self.exit_threshold,
+                )
+                self.reset()
+                return VadResult(VadEvent.SPEECH_END, prob, audio=captured)
             return VadResult(VadEvent.NONE, prob)
 
         self._silence_run += 1

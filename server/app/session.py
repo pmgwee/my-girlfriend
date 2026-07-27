@@ -65,6 +65,7 @@ class Session:
             silence_ms=self._settings.vad_silence_ms,
             min_speech_ms=self._settings.vad_min_speech_ms,
             prefix_ms=self._settings.vad_prefix_ms,
+            max_speech_ms=self._settings.vad_max_speech_ms,
         )
         self._conversation = Conversation(stages.persona, self._settings.llm_history_turns)
 
@@ -92,6 +93,12 @@ class Session:
                 await self._interrupt()
 
             if result.event is VadEvent.SPEECH_END and result.audio is not None:
+                # Logged because a long gap before a reply is usually the VAD
+                # holding the turn open, not the models being slow -- and the
+                # two are indistinguishable from the outside.
+                log.info(
+                    "turn captured %.2fs of speech", result.audio.size / SAMPLE_RATE
+                )
                 await self._start_turn(result.audio)
 
     async def _interrupt(self) -> None:
@@ -168,12 +175,21 @@ class Session:
 
         async def synth(chunk_text: str, chunk_mood: str | None):
             async with limit:
+                # Timed per chunk so a slow turn can be attributed to the right
+                # stage. A hosted TTS that has gone cold costs 15-20s here while
+                # the LLM leg looks normal, and without this split the whole
+                # turn just looks mysteriously slow.
+                synth_started = time.perf_counter()
                 samples = await asyncio.to_thread(
                     self._stages.tts.synthesize,
                     chunk_text,
                     self._settings.tts_voice,
                     self._settings.tts_speed,
                     chunk_mood,
+                )
+                log.info(
+                    "TTS %.0fms for %d chars", (time.perf_counter() - synth_started) * 1000,
+                    len(chunk_text),
                 )
             # A barge-in bumps the epoch; anything rendered after that is stale
             # and must never reach the speaker, or she'd bleat a fragment after
@@ -184,7 +200,11 @@ class Session:
 
         try:
             self._speaking = True
+            first_llm: float | None = None
             async for chunk in self._stages.llm.stream(self._conversation.messages()):
+                if first_llm is None:
+                    first_llm = time.perf_counter() - started
+                    log.info("LLM first chunk %.0fms", first_llm * 1000)
                 chunk, tag = emotion.split(chunk)
                 mood = tag or mood
                 if not chunk.strip():

@@ -35,7 +35,15 @@ export default function Page() {
   const [micOn, setMicOn] = useState(false);
 
   const [preferences, setPreferences] = useState<Preferences>({
-    halfDuplex: false,
+    // ON by default. The browser's echo canceller is not reliable enough on
+    // laptop speakers: measured in real use, her own voice came back through
+    // the mic, tripped the VAD, and barge-in cancelled her mid-reply. The log
+    // showed her transcribing her own name and "謝謝大家" as if the user had
+    // said them, then restarting the turn -- which reads as a 15-30s delay even
+    // though time-to-first-audio was only 5-9s.
+    //
+    // Turn it off if you wear headphones; then barge-in works as intended.
+    halfDuplex: true,
     showSubtitles: true,
     // On by default. Voice needs a microphone permission grant; typing needs
     // nothing, so it should be the thing that always works out of the box.

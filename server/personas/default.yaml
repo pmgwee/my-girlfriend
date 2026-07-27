@@ -2,11 +2,6 @@ name: 雨桐
 display_name: 雨桐
 locale: zh-TW
 
-# Shown faintly in the top-left corner, like the reference build.
-epigraph:
-  - 玲瓏骰子安紅豆，
-  - 入骨相思知不知。
-
 avatar:
   idle_video: /avatar/idle.mp4
   talking_video: /avatar/talking.mp4

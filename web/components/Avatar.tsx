@@ -6,7 +6,12 @@ import { useEffect, useRef, useState } from "react";
 // Module-level so they sit with the helpers that use them. Safe to reference
 // from the component below: the module finishes evaluating before any instance
 // renders or any effect fires.
-const IDLE_PLAYBACK_RATE = 0.6; // calm the 24fps breathing toward "near-static"
+// idle.mp4 is a seamless boomerang (forward+reverse, ~16s). 0.6 stretches the
+// repeat period to ~27s so the loop isn't obvious in a demo. The trade is a
+// mild slow-mo on motion (no frame-dropping this time -- the file is native
+// speed, just played slower). Bump to 1.0 for natural-speed blinks (16s loop,
+// still seamless).
+const IDLE_PLAYBACK_RATE = 1; // 0.6 is too slow, 1.0 is too fast
 const LIFT_GAIN = 0.004; // +0.4% max scale -- presence, not a VU meter
 const STANDBY_MAX = 4; // seconds; cap on the random talking in-point
 
@@ -138,7 +143,7 @@ export function Avatar({
         top: 0,
         right: 0,
         bottom: 0,
-        width: "min(58vw, 900px)",
+        width: "min(38vw, 600px)",
         overflow: "hidden",
         // Feathers the video's left edge into the background so it reads as one
         // scene rather than a pasted-in rectangle.
@@ -146,10 +151,6 @@ export function Avatar({
           "linear-gradient(to right, transparent 0%, rgba(0,0,0,0.45) 18%, #000 42%)",
         WebkitMaskImage:
           "linear-gradient(to right, transparent 0%, rgba(0,0,0,0.45) 18%, #000 42%)",
-        // Sub-perceptual presence lift (+0.4% max). The old `brightness` pump is
-        // gone -- a whole-frame brightness shift on every syllable read as a VU
-        // meter. This tiny scale stays below conscious perception; it just guards
-        // against her reading as a frozen photo on a still talking frame.
         transform: `scale(${1 + lift * LIFT_GAIN})`,
         transition: "transform 120ms linear",
       }}

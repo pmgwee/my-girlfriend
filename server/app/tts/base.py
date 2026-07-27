@@ -29,6 +29,12 @@ class TtsBackend(abc.ABC):
     #: MiniMax and CosyVoice 2 do both.
     supports_emotion: bool = False
 
+    #: True for backends served over a network, where an idle gap lets the
+    #: provider scale the model down. The next call then pays a cold start --
+    #: measured at 15-22s on fal.ai, against ~3s warm. Local backends never go
+    #: cold, so they leave this False and skip the keep-alive entirely.
+    needs_keepwarm: bool = False
+
     #: How many synthesis calls the orchestrator may run at once. Stateful or
     #: non-re-entrant runtimes (ONNX, a single GPU context) stay at 1 so calls
     #: serialise; stateless HTTP backends can raise it to overlap one chunk's

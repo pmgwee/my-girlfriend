@@ -46,6 +46,10 @@ class MiniMaxTts(TtsBackend):
     # once: chunk k+1 synthesises while chunk k plays, closing the inter-sentence
     # gap that a single in-flight request leaves on a ~2-5s backend.
     concurrency = 2
+    # fal scales the model down when idle; the next call then costs 15-22s
+    # instead of ~3s. That penalty lands exactly where it hurts -- the first
+    # thing she says after you've been quiet for a moment.
+    needs_keepwarm = True
 
     def __init__(
         self,

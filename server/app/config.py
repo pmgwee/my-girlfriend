@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     vad_silence_ms: int = 500
     # Ignore blips shorter than this so a cough doesn't trigger a turn.
     vad_min_speech_ms: int = 300
+    # Hard ceiling on one turn. Guarantees a turn always ends even if room noise
+    # keeps the speech probability above the exit threshold.
+    vad_max_speech_ms: int = 20_000
     # Audio kept from *before* the VAD fired, so the first syllable isn't clipped.
     vad_prefix_ms: int = 320
 
@@ -120,6 +123,15 @@ class Settings(BaseSettings):
     # Run scripts/list_voices.ps1 to hear the full set and pick a different one.
     tts_voice: str = "zf_001"
     tts_speed: float = 1.0
+    # Seconds between keep-alive syntheses for hosted backends. 0 disables.
+    #
+    # DISABLED because measurement showed it is unnecessary on fal.ai: calls
+    # after 15s / 45s / 90s idle took 3.8s / 4.9s / 3.4s, versus 3.1s
+    # back-to-back. There is no idle scale-down to defend against, so pinging
+    # would just spend money. The 15-22s seen on a fresh process is
+    # first-call-ever cost (TLS, client setup), which one warmup at startup
+    # already covers. Kept as a switch in case another provider behaves worse.
+    tts_keepwarm_seconds: int = 0
     # qwentts.cpp's OpenAI-compatible server, if tts_backend == "qwentts".
     qwentts_base_url: str = "http://127.0.0.1:8081"
 

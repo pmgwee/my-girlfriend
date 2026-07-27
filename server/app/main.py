@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
         language=settings.stt_language,
         # The persona's locale decides Simplified vs Traditional output.
         locale=persona.locale,
+        # Her name is baked into the priming prompt so Whisper transcribes it
+        # correctly instead of guessing a homophone.
+        name=persona.display_name,
     )
 
     log.info("loading TTS (%s)...", settings.tts_backend)
@@ -73,12 +76,37 @@ async def lifespan(app: FastAPI):
         )
 
     _stages = Stages(stt=stt, tts=tts, llm=llm, persona=persona, settings=settings)
+
+    keepwarm = asyncio.create_task(_keep_tts_warm(tts, settings.tts_keepwarm_seconds))
     log.info("ready on ws://%s:%s/ws", settings.host, settings.port)
 
     yield
 
+    keepwarm.cancel()
     await llm.aclose()
     tts.close()
+
+
+async def _keep_tts_warm(tts, interval: int) -> None:
+    """Ping a hosted TTS so the provider doesn't scale it down between turns.
+
+    Runs at the app level rather than per-session so several open tabs don't
+    multiply the ping rate. Failures are swallowed: a keep-alive that errors
+    must never take the server down, and the next real call will surface the
+    problem properly.
+    """
+    if interval <= 0 or not getattr(tts, "needs_keepwarm", False):
+        return
+
+    log.info("TTS keep-alive every %ds (cold start is 15-22s otherwise)", interval)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(tts.synthesize, "嗯", tts.default_voice, 1.0, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort by design
+            log.debug("keep-alive ping failed: %s", exc)
 
 
 app = FastAPI(title="virtual-girlfriend", lifespan=lifespan)

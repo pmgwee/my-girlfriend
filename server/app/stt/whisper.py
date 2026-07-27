@@ -55,14 +55,41 @@ _MIN_AUDIO_SECONDS = 0.30
 # Phrases Whisper emits when fed silence or noise -- subtitle credits bled into
 # its training data. If a transcript is *only* one of these, it's a hallucination.
 _HALLUCINATIONS = {
+    # Simplified
     "字幕由amara.org社群提供", "字幕志愿者", "请不吝点赞订阅转发打赏支持明镜与点点栏目",
-    "谢谢大家", "谢谢观看", "谢谢", "byebye", "thanks for watching",
-    "thank you for watching", "subscribe", "you", "bye", "。", ".", "！", "!",
+    "谢谢大家", "谢谢观看", "谢谢", "谢谢收看", "下次再见", "请订阅",
+    # Traditional. A zh-TW persona makes Whisper emit these forms, so a
+    # Simplified-only list silently misses them -- observed in a real session
+    # where "謝謝大家。" was picked up off the speakers and treated as a real
+    # user turn, which then interrupted her mid-reply.
+    "字幕由amara.org社群提供", "字幕志願者", "謝謝大家", "謝謝觀看", "謝謝",
+    "謝謝收看", "下次再見", "請訂閱", "請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
+    "中文字幕由", "明鏡與點點欄目",
+    # English / punctuation-only
+    "byebye", "bye bye", "thanks for watching", "thank you for watching",
+    "subscribe", "you", "bye", "。", ".", "！", "!", "?", "？",
 }
 
 
+# Stripped before matching. Whisper punctuates its hallucinations ("謝謝大家。"),
+# so comparing raw text against the bare phrases misses nearly all of them.
+_PUNCTUATION = " \t,，。.、！!？?~～…「」\"'"
+
+
+def _normalise(text: str) -> str:
+    stripped = text.strip().lower()
+    for char in _PUNCTUATION:
+        stripped = stripped.replace(char, "")
+    return stripped
+
+
+# Both sides go through the same normaliser, so the phrases above can be written
+# naturally ("thanks for watching") without their spaces defeating the match.
+_HALLUCINATIONS = {_normalise(phrase) for phrase in _HALLUCINATIONS}
+
+
 def _looks_hallucinated(text: str) -> bool:
-    normalised = text.strip().lower().replace(" ", "").replace(",", "").replace("，", "")
+    normalised = _normalise(text)
     return normalised in _HALLUCINATIONS or len(normalised) == 0
 
 
@@ -74,22 +101,34 @@ class WhisperStt:
         compute_type: str,
         language: str | None,
         locale: str = "zh-CN",
+        name: str | None = None,
     ) -> None:
         # Whisper only understands "zh"; the region decides which script we
-        # steer it toward via the priming prompt.
+        # steer it toward via the priming prompt. `name` is baked into that
+        # prompt so the spoken name maps to the right characters (see _prime).
         self.language = "zh" if language and language.startswith("zh") else language
-        self._script_prompt = self._prime(self.language, locale)
+        self._script_prompt = self._prime(self.language, locale, name)
+        if self._script_prompt:
+            log.info("STT priming prompt: %s", self._script_prompt)
         self._model, self.device = self._load(model_size, device, compute_type)
 
     @staticmethod
-    def _prime(language: str | None, locale: str) -> str | None:
+    def _prime(language: str | None, locale: str, name: str | None = None) -> str | None:
         if language != "zh":
             return None
+        # Embed the persona's name so Whisper maps the *spoken* name to the
+        # correct characters instead of a homophone -- e.g. 雨桐, not 雨彤/语桐.
+        # A mis-transcribed name is the one STT error that breaks role-play: the
+        # model sees the user "calling her the wrong name" and corrects them.
+        who = f"女朋友{name}" if name else "女朋友"
         if locale.lower() in {"zh-tw", "zh-hk", "zh_tw", "zh_hk"}:
             # Traditional script, and Taiwanese particles in the prompt so
             # Whisper expects them rather than "correcting" them away.
-            return "以下是一段輕鬆的日常對話，台灣口音，會用「欸」「齁」「啦」「喔」這些語氣詞。"
-        return "以下是一段轻松的日常中文对话。"
+            return (
+                f"以下是{who}輕鬆的日常對話，台灣口音，"
+                "會用「欸」「齁」「啦」「喔」這些語氣詞。"
+            )
+        return f"以下是{who}轻松的日常中文对话。"
 
     @staticmethod
     def _load(model_size: str, device: str, compute_type: str) -> tuple[WhisperModel, str]:  # noqa: C901
