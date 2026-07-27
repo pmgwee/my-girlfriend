@@ -1,143 +1,105 @@
-# 晚晚 — 本地实时语音 AI 女友
+# 雨桐 — 即時語音 AI 女友
 
-A fully local, real-time voice companion. No API keys, no cloud, no per-minute
-billing. Speak, she hears you, thinks, and answers out loud — and you can cut her
-off mid-sentence like a real phone call.
-
-Four models in a cascade, each swappable:
+A real-time voice companion with a **cloned voice**, **emotion that follows the
+conversation**, and Taiwanese Mandarin. Speak to her, she answers out loud, and
+you can cut her off mid-sentence like a real phone call.
 
 ```
-你的声音 ──► Silero VAD v5 ──► Whisper ──► llama.cpp ──► Kokoro TTS ──► 她的声音
-             (说话检测)        (识别)      (思考)        (合成)
+你的聲音 ──► Silero VAD ──► Whisper ──► GLM-5.2 ──► MiniMax ──► 她的聲音
+             (說完了沒)     (聽懂)      (想)        (克隆音色)
                   │
-                  └── 她说话时你一开口，立刻打断她 (barge-in)
+                  └── 她說話時你一開口，立刻打斷她
 ```
+
+Every number below was measured on the target machine (RTX 3060 Laptop, 6GB),
+not taken from a vendor page.
 
 ---
 
-## Hardware reality check
+## Current stack
 
-This is the part most tutorials skip. **Read it before you start.**
-
-The build this is modelled on assumed a 15GB GPU. This repo is tuned for **6GB**,
-which is what a laptop RTX 3060/3070/4060 actually has:
-
-Measured on an RTX 3060 Laptop (6144 MiB) with a normal desktop running:
-
-| Stage | Model | VRAM | Latency |
+| stage | what runs | where | measured |
 |---|---|---|---|
-| VAD | Silero v5 (ONNX) | 0 — CPU | 0.17ms / 32ms frame |
-| STT | Whisper `base` int8 | 0 — CPU | ~670ms |
-| LLM | Qwen3-4B Q4_K_M | **3174 MiB** | ~300ms to first token |
-| TTS | Kokoro-82M (ONNX) | 0 — CPU | 0.41× realtime |
+| **VAD** | Silero v5 (ONNX) | local CPU | 0.17ms / 32ms frame |
+| **STT** | Whisper `large-v3-turbo` int8 | local GPU, 981 MiB | **290ms**, 91% |
+| **LLM** | GLM-5.2 | Z.ai API | ~1.9s to first clause |
+| **TTS** | MiniMax Speech 2.8 HD | fal.ai | ~400ms, cloned voice |
+| **Emotion** | 6 moods, chosen by the LLM | — | per reply |
 
-**Only the LLM is on the GPU, and that is the whole design.** The measurement
-that forced it:
-
-```
-total VRAM                                 6144 MiB
-Windows desktop + Chrome/OBS/Discord/VSCode 2404 MiB   <- the part tutorials ignore
-llama.cpp (Qwen3-4B, 4096 ctx)              3174 MiB
-                                            --------
-free                                         566 MiB
-```
-
-Close the heavy apps and the desktop drops to ~1300 MiB, which is the difference
-between "no room for anything else" and "room for a voice cloner". Measure your
-own baseline with `nvidia-smi` before believing any table, including this one.
-
-Whisper needs ~600MB on GPU. It does not fit. Running it on CPU costs 670ms per
-turn and never OOMs mid-conversation, which is the right trade for something you
-talk to.
-
-### Choosing the Whisper size
-
-Whisper pads every clip to a 30-second window, so transcription cost is **flat**
-regardless of how briefly you spoke. Model size dominates. Measured on CPU with
-Mandarin, scoring character overlap:
-
-| model | latency | accuracy |
-|---|---|---|
-| `tiny` | 356ms | 71% |
-| **`base`** | **671ms** | **87%** ← default |
-| `small` | 2039ms | 89% |
-
-`base` is 3× faster than `small` for two points of accuracy. Homophone errors
-(在呢 → 再呢) survive at every size; the persona prompt tells the model to read
-through them, which works well in practice.
-
-### Moving Whisper to the GPU
-
-Worth ~470ms if you have the headroom — close Chrome/OBS, or run a bigger card.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -GpuStt
-```
-
-That installs cuBLAS + cuDNN (~1.3GB), which CTranslate2 links dynamically but
-doesn't bundle. Then set `STT_DEVICE=cuda` and `STT_COMPUTE_TYPE=int8_float16`
-in `.env`. Check free VRAM first with `nvidia-smi`; if the server logs a fallback
-to CPU on startup, you didn't have room.
-
-### About lip-sync
-
-Real neural lip-sync (MuseTalk, Wav2Lip, SadTalker) **is not possible on a 6GB
-card alongside this pipeline.** MuseTalk alone wants ~8GB and adds 200–500ms per
-frame. With four models already resident you have roughly 2GB free.
-
-So the avatar is an idle/talking **video loop** — which is also what the original
-build does.
-
-What's here instead is a real signal, not a fake one: an `AnalyserNode` measures
-the RMS of audio **actually playing** and passes it to `<Avatar>` as
-`mouthOpenness` (0–1, per animation frame). Today it drives a subtle brightness
-and scale lift. That is exactly the input a lip-sync backend consumes, so if you
-later move to a 12GB+ GPU, see [Adding real lip-sync](#adding-real-lip-sync).
-
-(Measuring in the browser rather than on the server is deliberate — TTS renders a
-sentence in ~200ms that then takes ~1.6s to play, so a server-side level would
-run well ahead of her voice.)
+Only Whisper uses the GPU. That is deliberate — see [Why this shape](#why-this-shape).
 
 ---
 
 ## Setup
 
-**Requirements:** Windows 11, NVIDIA GPU (6GB+), Python 3.10–3.12, Node.js 20+,
-~4GB disk.
-
-**First, move into the project folder.** PowerShell opens in `C:\WINDOWS\system32`
-by default, and every command below uses a relative path — running them from
-anywhere else gives you `the argument '...' does not exist`:
+PowerShell opens in `C:\WINDOWS\system32`, and every command below uses a
+relative path. Move into the project first or you get
+`the argument '...' does not exist`:
 
 ```powershell
 cd C:\Users\quekm\Desktop\projects\virtual-girlfriend
 ```
 
-Then:
+### 1. Models and dependencies
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\download_models.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -GpuStt
 ```
 
-Verify everything loaded before starting anything:
+`-GpuStt` adds cuBLAS + cuDNN (~1.3GB) so Whisper runs on the GPU. Without it
+Whisper falls back to CPU: 605ms instead of 290ms, and it misreads 在呢 as 再呢.
+
+### 2. Keys
+
+In `.env`:
+
+```
+ZAI_API_KEY=<your Z.ai key>
+FAL_KEY=<your fal.ai key>
+```
+
+`ZAI_BASE_URL` and `GLM_MODEL` are already set. **Note:** if your Z.ai URL is
+`api.z.ai/api/coding/paas/v4`, that is the Coding Plan endpoint — driving a
+companion app through it likely falls outside that plan's terms. The general
+endpoint is `https://api.z.ai/api/paas/v4`, same key.
+
+### 3. Her voice
+
+Put 10–20 seconds of clean single-speaker audio in `voices\`, then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\make_voice.ps1 -Source voices\her.wav -Start 0 -Duration 12
+```
+
+That converts to mono 24kHz and **checks the clip** — duration, peak level,
+clipping, silence ratio. Fix anything it flags; a bad reference is the main
+cause of a robotic clone.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\clone_voice_fal.ps1
+```
+
+This uploads, clones, saves `samples\clone_preview.mp3`, and writes the voice id
+into `.env` automatically. **There is no dashboard step** — nothing to copy.
+
+> **fal.ai requires ≥10s for cloning.** If your clip is shorter the script stops
+> before spending anything. Pass `-Extend` to loop a short clip up to 10s —
+> honest (same speaker, nothing fabricated) but it adds no new phonetic
+> material, so real audio is better.
+
+> Cloned voices **expire after 7 days unused**. Just re-run the clone script.
+
+### 4. Run
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 ```
 
-This loads each model, times it, and does a TTS → STT round trip — Kokoro says
-"今天天气真好" and Whisper reads it back. If that passes, the audio path is
-correct end to end.
-
-Then three terminals, **in this order**:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_llm.ps1
-```
+Then two terminals:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run_server.ps1
@@ -147,89 +109,180 @@ powershell -ExecutionPolicy Bypass -File scripts\run_server.ps1
 powershell -ExecutionPolicy Bypass -File scripts\run_web.ps1
 ```
 
-Open <http://localhost:3000>. The text box at the bottom works immediately —
-**typing never needs microphone permission**. Click the mic button to add voice.
-
-> First run of `run_server.ps1` downloads Whisper (~500MB) from HuggingFace and
-> takes a few minutes. After that it starts in ~10 seconds.
+Open <http://localhost:3000>. **The text box works immediately — typing never
+needs microphone permission.** Click the mic to add voice.
 
 ---
 
-## Add her face
+## Why this shape
 
-Put your avatar video in `web/public/avatar/`:
+The build this is modelled on assumed a 15GB GPU. This one has 6GB, and the
+difference decides almost every choice here.
 
-| File | Required | What it is |
+### Only the LLM-sized things move off-GPU
+
+```
+total VRAM                                   6144 MiB
+Windows desktop + browser/OBS/Discord   900-2400 MiB   ← the part tutorials ignore
+Whisper large-v3-turbo int8                   981 MiB
+```
+
+A local 4B LLM took **3174 MiB**, leaving no room for anything else. Measure
+your own baseline with `nvidia-smi` before trusting any table, including this one.
+
+### Local TTS cannot do this in real time
+
+Qwen3-TTS 1.7B clones beautifully and runs at **3.8× realtime** here — 5.7s to
+produce 1.4s of speech. Generation is slower than playback, so audio underruns
+no matter how it is streamed. Neither dtype nor streaming mode helped:
+
+| variant | speed |
+|---|---|
+| 1.7B bfloat16 | 3.75× |
+| 1.7B float16 | 3.80× |
+| 1.7B streaming | 3.91× |
+| 1.7B non-streaming | 3.88× |
+
+The published "97ms first packet" is a datacenter-GPU figure. It does not
+transfer to a 6GB laptop card.
+
+### Whisper model size dominates STT cost
+
+Whisper pads every clip to a 30-second window, so transcription cost is **flat**
+regardless of how briefly you spoke:
+
+| model | device | latency | accuracy | reads 在呢 as |
+|---|---|---|---|---|
+| tiny | cpu | 356ms | 71% | — |
+| base | cpu | 605ms | 90% | 再呢 ✗ |
+| small | cpu | 2039ms | 89% | — |
+| **large-v3-turbo** | **cuda** | **290ms** | **91%** | **在呢** ✓ |
+
+---
+
+## Making her *her*
+
+Everything personality-related is in
+[`server/personas/default.yaml`](server/personas/default.yaml). Edit, restart
+`run_server.ps1`, done.
+
+```yaml
+name: 雨桐
+locale: zh-TW
+epigraph: ["玲瓏骰子安紅豆，", "入骨相思知不知。"]
+greeting: 欸，你終於上線了喔，人家等你等好久了啦。
+```
+
+Rules the prompt must keep, or the illusion breaks:
+
+1. **≤2 sentences, ≤40 characters.** The single biggest factor. Unbounded
+   replies take 30 seconds to speak.
+2. **No markdown, lists, emoji, or `（動作描寫）`** — all read aloud verbatim.
+   The one exception is the leading `[情緒]` tag, which the server strips.
+3. **Numbers as Chinese characters** — 三點半, not 3:30.
+4. **Taiwanese vocabulary** — 影片/網路/軟體/計程車/螢幕, not
+   視頻/網絡/軟件/出租車/屏幕. Cloning carries her *accent* automatically but
+   cannot fix word choice, and a Taiwanese voice saying 视频 sounds wrong.
+
+### Emotion
+
+The LLM tags each reply and the server routes it to the TTS:
+
+```
+[撒嬌] 你怎麼才來嘛，人家等好久了啦。
+   └─ stripped, sent to TTS as a mood
+```
+
+Six moods: 溫柔 撒嬌 開心 生氣 難過 平靜. Tags resolve in either script, plus
+synonyms (害羞 → 撒嬌).
+
+**Most of 撒嬌 lives in the words, not the TTS parameter** — 人家 instead of 我,
+trailing 嘛/啦/呀, stretched vowels. That survives on every backend, including
+MiniMax, whose fixed 7-value emotion enum has no 撒嬌 at all (it maps to
+`happy`). Relying on the TTS alone would make the effect vanish on a provider
+switch.
+
+Observed:
+
+| you say | mood | she says |
 |---|---|---|
-| `idle.mp4` | yes | 5–20s seamless loop, resting. |
-| `talking.mp4` | no | Same framing, mouth moving. Crossfades in when she speaks. |
-| `poster.jpg` | no | First frame, shown while video buffers. |
+| 你等我很久了吗 | 撒嬌 | 也沒有很久啦，人家只是想趕快聽到你的聲音嘛。 |
+| 我今天心情很差 | 溫柔 | 怎麼了，發生什麼事？慢慢說沒關係，我在聽。 |
+| 我看到你跟别的男生聊天 | 生氣 | 你在講哪個啦，那是同事好不好。 |
 
-Shoot vertical (the pane is ~58vw wide, full height), keep the subject
-right-of-centre, and make the loop seamless. Any image-to-video model (Veo,
-Kling, Hailuo, Runway, Wan) generates these well from a single portrait.
+Note 生氣 drops 人家 and shortens the sentences. The register shifts, not just
+the label.
 
-Generate **one still first**, then use that same still as the input image for
-both videos — if lighting or wardrobe drift between them, the crossfade is
-visible.
+---
 
-Then process them for the web:
+## Her face
+
+Put video in `web/public/avatar/`:
+
+| file | required | what |
+|---|---|---|
+| `idle.mp4` | yes | seamless loop, resting |
+| `talking.mp4` | no | same framing, mouth moving |
+| `poster.jpg` | no | first frame |
+
+Generate one still first, then use *that same still* for both clips — if
+lighting or wardrobe drift, the crossfade is visible. Then:
 
 ```bash
 ffmpeg -i raw_idle.mp4 -filter_complex "[0]reverse[r];[0][r]concat=n=2:v=1:a=0" -an -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p -movflags +faststart web/public/avatar/idle.mp4
 ```
 
 The reversed copy makes the loop seam mathematically perfect. For `talking.mp4`
-skip the reverse — just strip audio and normalize:
+skip the reverse. `-pix_fmt yuv420p` and `-movflags +faststart` are load-bearing
+— without them Chrome refuses to play or stalls. **Don't add `fps=30`** unless
+your source is already 30fps; upsampling from 24 duplicates every fourth frame
+and adds visible judder on slow motion like breathing.
 
-```bash
-ffmpeg -i raw_talking.mp4 -an -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p -movflags +faststart web/public/avatar/talking.mp4
-```
+### Lip-sync
 
-```bash
-ffmpeg -i web/public/avatar/idle.mp4 -vframes 1 -q:v 2 web/public/avatar/poster.jpg
-```
+Real neural lip-sync (MuseTalk, Wav2Lip) needs ~8GB on its own and adds
+200–500ms. Not possible here, and the reference build doesn't do it either.
 
-`-pix_fmt yuv420p` and `-movflags +faststart` are load-bearing — without them
-Chrome either refuses to play the file or stalls until fully buffered. Don't add
-`fps=30` unless your source is already 30fps; upsampling from 24 duplicates every
-fourth frame and adds visible judder on slow motion like breathing.
-
-Without any video you get a placeholder card; everything else works.
+What exists instead is a real signal: an `AnalyserNode` measures the RMS of
+audio **actually playing** and passes it to `<Avatar>` as `mouthOpenness`. That
+is exactly what a lip-sync backend consumes, so the seam is cut for a future
+12GB+ card. (Measured in the browser, not the server — TTS renders a sentence in
+~200ms that takes ~1.6s to play, so a server-side level would run ahead of her
+voice.)
 
 ---
 
-## Making her *her*
+## Switching TTS backends
 
-Everything personality-related is in [`server/personas/default.yaml`](server/personas/default.yaml).
-Edit it, restart `run_server.ps1`, done.
+| backend | her voice | emotion | speed | cost |
+|---|---|---|---|---|
+| **`minimax`** (fal.ai) | ✅ from ~10s | ⚠️ 7-value enum, no 撒嬌 | real-time | $0.10 / 1k chars |
+| `cosyvoice` (DashScope) | ✅ from 3–10s | ✅ free-text, 撒嬌 works | real-time | ~$28 / 1M chars |
+| `qwen3` (local) | ✅ from 5–10s | ❌ | **3.8× realtime** | free |
+| `kokoro` (local) | ❌ fixed bank | ❌ | 0.4× realtime | free |
 
-```yaml
-name: 林晚
-epigraph: ["玲珑骰子安红豆，", "入骨相思知不知。"]   # faint text, top-left
-voice: zf_001
-system_prompt: |
-  你叫林晚…
-greeting: 诶，你终于来了呀，我等你好久了。
+One line in `.env`; weights, reference clip and transcript are shared, so
+nothing needs re-downloading:
+
+```
+TTS_BACKEND=minimax     # hosted, real-time
+TTS_BACKEND=qwen3       # local, free, offline rendering only
 ```
 
-Three rules the prompt must keep, or the illusion breaks:
+`qwen3` **cannot sustain live conversation** — fine for rendering lines you edit
+into a video, not for talking to her.
 
-1. **No markdown, no `*actions*`.** TTS reads asterisks out loud. (The server
-   strips them as a backstop, but the model shouldn't emit them.)
-2. **1–3 sentences.** A paragraph that reads fine on screen is interminable aloud.
-3. **No assistant voice.** "有什么可以帮您的吗" instantly kills it.
+### Running cost
 
-### Picking a voice
+Replies average ~30 characters:
 
-Kokoro v1.1-zh has 100 Chinese voices with numeric names (`zf_001`–`zf_099`
-female, `zm_009`–`zm_100` male), so you have to listen:
+| | cost |
+|---|---|
+| one reply | $0.003 |
+| heavy day of testing (~500) | $1.50 |
+| a few days of demo work | ~$5 |
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\list_voices.ps1 -Count 12
-```
-
-WAVs land in `samples\`. Put your pick in `.env` as `TTS_VOICE`.
+A $10 top-up covers a full demo cycle.
 
 ---
 
@@ -237,189 +290,40 @@ WAVs land in `samples\`. Put your pick in `.env` as `TTS_VOICE`.
 
 All in `.env` ([`.env.example`](.env.example) documents every key).
 
-**She interrupts herself / hears her own voice.** The browser's echo canceller
-handles this on laptop speakers, but it's imperfect. In order: use headphones →
-raise `VAD_THRESHOLD` to `0.75` → turn on **半双工模式** in settings (gates the
-mic while she speaks; bulletproof, but you lose barge-in).
+**She doesn't react at all.** Lower `VAD_THRESHOLD` toward 0.35. Useful range is
+0.35–0.45.
 
-**She cuts you off mid-sentence.** Raise `VAD_SILENCE_MS` to `900`–`1100`.
+**Room noise triggers her.** Raise toward 0.5.
 
-**She's slow to answer.** Lower `VAD_SILENCE_MS` to `500`. Then check the server
-log for `time-to-first-audio`; under 1200ms feels live. Measured here, typed
-input (so excluding STT):
+**She cuts you off mid-sentence.** Raise `VAD_SILENCE_MS` to 900–1100.
 
-```
-942ms to first audio   =  LLM first clause ~400ms  +  TTS first chunk ~540ms
-```
+**She hears her own voice.** Use headphones → raise `VAD_THRESHOLD` → turn on
+**半雙工模式** in settings (gates the mic while she speaks; kills echo, loses
+barge-in).
 
-Add ~670ms for voice input. The trick that makes this work is in
-[`llm/client.py`](server/app/llm/client.py): the reply is split at clause
-boundaries and the *first* chunk flushes after just 5 characters, so TTS starts
-on "在煮咖啡呢，" while the model is still writing the rest. Buffering the whole
-reply first measured 2918ms — 3× worse.
-
-If it's still slow: STT dominating → `STT_MODEL=tiny`; LLM dominating → lower
-`LLM_MAX_TOKENS`.
-
-**Wrong words in the transcript.** Whisper `small` mishears names. Set
-`STT_MODEL=medium` **only** if you also drop the LLM to Qwen3-1.7B — both won't
-fit in 6GB.
-
----
-
-## Switching TTS backends
-
-All measured on this machine (RTX 3060 Laptop, 6GB):
-
-| backend | her voice | emotion | speed | cost |
-|---|---|---|---|---|
-| `minimax` (fal.ai) | ✅ clones from ~5s | ⚠️ 7-value enum, no 撒娇 | real-time | $0.10 / 1k chars |
-| `cosyvoice` (DashScope) | ✅ clones from 3-10s | ✅ free-text, 撒娇 works | real-time | ~$28 / 1M chars |
-| `qwen3` (local) | ✅ clones from 5-10s | ❌ none | **3.8x realtime** | free |
-| `kokoro` (local) | ❌ fixed voice bank | ❌ none | 0.4x realtime | free |
-
-**`qwen3` cannot sustain live conversation.** At 3.8x realtime, generation is
-slower than playback and audio underruns mid-sentence. dtype and streaming mode
-made no difference (3.75x-3.91x across four variants). It is fine for rendering
-lines offline; it is not fine for talking to her.
-
-Switching is one line in `.env` -- weights, reference clip and transcript are
-shared, so nothing needs re-downloading or re-cloning:
-
-```
-TTS_BACKEND=minimax     # hosted, real-time
-TTS_BACKEND=qwen3       # local, free, offline rendering only
-```
-
-### What it costs to run hosted
-
-Replies are capped at 40 characters by the persona, averaging ~30:
-
-| | cost |
-|---|---|
-| one reply | $0.003 |
-| a heavy day of testing (~500 replies) | $1.50 |
-| a few days of demo work | ~$5 |
-
-Cloning is a one-time charge of a few cents. A $10 top-up covers a full demo
-cycle with room to spare.
-
----
-
-## Voice cloning
-
-Kokoro cannot clone a voice at any quality — its voices are a fixed embedding
-bank. If you want her to sound like a specific person, you need Qwen3-TTS, which
-clones from 5–10 seconds of reference audio.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -VoiceClone
-```
-
-That pulls torch + `qwen-tts` (~3GB). Then cut your reference clip:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\make_voice.ps1 -Source recording.mp3 -Start 12 -Duration 8
-```
-
-The script converts to mono 24kHz WAV and then **checks the clip** — duration,
-peak level, clipping, and silence ratio — because a bad reference is the single
-biggest cause of a robotic clone. Fix anything it flags before going further.
-
-Then in `.env`:
-
-```
-TTS_BACKEND=qwen3
-QWEN3_REF_AUDIO=voices/reference.wav
-QWEN3_REF_TEXT=<exact transcript of the clip>
-```
-
-`QWEN3_REF_TEXT` is not optional. Cloning quality drops noticeably when the
-transcript doesn't match the audio.
-
-**Reference audio rules that actually matter:**
-
-- 5–10s. Over ~15s makes cloning *worse*, not better.
-- One speaker, no music, no reverb, no background noise.
-- The delivery you want back — a flat reference clones to a flat voice.
-
-Only clone a voice you have permission to use: your own, one recorded with
-consent, or a public dataset sample. Cloning someone's voice without their
-agreement carries real legal exposure in many places.
-
-### The VRAM problem
-
-On a 6GB card you cannot have the 1.7B cloner *and* a 4B LLM resident:
-
-| Config | TTS | LLM | Total | Fits 6GB? |
-|---|---|---|---|---|
-| Kokoro (no cloning) | 0 (CPU) | 3174 MiB | ~4.1 GB | yes |
-| **Qwen3-TTS 0.6B** | ~2.0 GB | 3174 MiB | **~6.0 GB** | barely |
-| Qwen3-TTS 1.7B | ~4.2 GB | 3174 MiB | ~8.2 GB | **no** |
-| Qwen3-TTS 1.7B + hosted LLM | ~4.2 GB | 0 | ~5.1 GB | yes |
-
-The LLM is the biggest single consumer *and* the one that benefits most from
-being larger. If you want the 1.7B voice and smarter replies, point
-`LLM_BASE_URL` at a hosted OpenAI-compatible endpoint and give the whole GPU to
-voice. Everything you say still gets transcribed locally; only the text of your
-messages leaves the machine.
-
----
-
-## Upgrading to qwentts.cpp
-
-Kokoro is the default because it installs from pip with no compiler. Qwen3-TTS
-(what the original build uses) sounds clearly better on Mandarin and supports
-voice cloning and dialects — but you compile it yourself.
-
-1. Build [qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp) with
-   `buildcuda.cmd` (needs CUDA Toolkit + MSVC Build Tools).
-2. Get GGUFs from [Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF).
-   The 0.6B Q4_K_M talker needs ~255MB.
-3. Run its `tts-server` on port 8081.
-4. In `.env`: `TTS_BACKEND=qwentts` and `TTS_VOICE=cherry`.
-
-The adapter talks to it over HTTP ([`server/app/tts/qwentts.py`](server/app/tts/qwentts.py)),
-so it can crash or be rebuilt without taking the pipeline down.
-
----
-
-## Adding real lip-sync
-
-Needs a 12GB+ GPU. The seam is already cut:
-
-- **Server** — `Session._speak()` in [`server/app/session.py`](server/app/session.py)
-  already slices synthesised audio before sending. A lip-sync stage slots in
-  beside it: take the same PCM, produce frames, send them as a second binary
-  stream tagged with the same `chunkId`.
-- **Client** — `<Avatar>` in [`web/components/Avatar.tsx`](web/components/Avatar.tsx)
-  receives `mouthOpenness`. Swap the two `<video>` elements for a `<canvas>` that
-  blits incoming frames; nothing else in the UI changes.
-
-Realistic budget: MuseTalk ~8GB and ~30ms/frame on a 4070. You'd also want to
-move Whisper to CPU to free VRAM, which costs ~400ms per turn. It is a genuine
-trade, not a free upgrade.
+**She's slow.** Check `time-to-first-audio` in the server log; under 1200ms
+feels live. The reply is split at clause boundaries and the *first* chunk
+flushes after 5 characters, so TTS starts on 「在煮咖啡呢，」 while the model is
+still writing. Buffering the whole reply first measured 2918ms — 3× worse.
 
 ---
 
 ## Layout
 
 ```
-server/
-  app/
-    vad/silero.py       Silero v5 on bare onnxruntime (no torch)
-    stt/whisper.py      faster-whisper + hallucination filtering
-    llm/client.py       streaming client + sentence chunking
-    tts/                kokoro | qwentts | piper, behind one interface
-    session.py          the cascade, barge-in, cancellation
-    main.py             FastAPI + WebSocket
-    doctor.py           end-to-end self-test
-  personas/default.yaml
+server/app/
+  vad/silero.py       Silero v5 on bare onnxruntime (no torch)
+  stt/whisper.py      faster-whisper + script priming + hallucination filter
+  llm/client.py       streaming, sentence chunking, thinking-disable
+  emotion.py          mood tags, script aliases, per-backend mapping
+  tts/                minimax | cosyvoice | qwen3 | kokoro | dashscope | piper
+  session.py          the cascade, barge-in, cancellation
+  doctor.py           end-to-end self-test
 web/
-  app/page.tsx          the scene
-  components/           Avatar, Orb, Subtitles, Controls, TopBar
-  lib/voice-client.ts   mic capture, WS, scheduled playback
-scripts/                setup + run + model download
+  app/page.tsx        the scene
+  components/         Avatar, Orb, Subtitles, Controls, TopBar
+  lib/voice-client.ts mic capture, WS, scheduled playback
+scripts/              setup, models, voice cloning, run, doctor
 ```
 
 ### Protocol
@@ -428,54 +332,48 @@ Browser → server: binary PCM16 mono @16kHz, plus JSON `{type: start|text|reset
 
 Server → browser: JSON events (`ready`, `user_transcript`, `assistant_delta`,
 `audio_start`, `audio_end`, `interrupted`, `turn_end`, `error`) interleaved with
-binary PCM16 at the rate given in `audio_start`. All outbound traffic is
-serialised through one writer task so a JSON header always immediately precedes
-the audio it describes.
+binary PCM16. All outbound traffic is serialised through one writer task so a
+JSON header always immediately precedes the audio it describes.
 
 ---
 
 ## Troubleshooting
 
+Run `scripts\doctor.ps1` first — it isolates which stage is dead, times each
+model, and does a TTS → STT round trip that proves the audio path end to end.
+
 **`The argument 'scripts\...' does not exist`** — you're not in the project
-folder. `cd C:\Users\quekm\Desktop\projects\virtual-girlfriend` first. Every
-script here uses relative paths.
+folder. `cd` there first.
 
-**`Cannot reach the LLM`** — `run_llm.ps1` isn't running, or it's still loading.
-Wait for `server listening`, then check <http://127.0.0.1:18080/v1/models>; it
-should return JSON with a `data` array. If you get an HTML error page instead,
-something else owns that port — `run_llm.ps1` refuses to start in that case and
-names the offending process. Port 18080 is used precisely because 8080 (Apache,
-Jenkins, Tomcat) and 8090 (Windows notification helper) are commonly taken.
+**She ignores your voice entirely** — the VAD. Silero v5 requires the previous
+chunk's last 64 samples prepended (576, not 512); the ONNX input shape is
+`[None, None]` so passing 512 returns ~0.001 for everything with no error. Fixed
+here, and the doctor now tests that speech *does* trigger, not only that silence
+doesn't.
 
-**Whisper falls back to CPU / `cublas64_12.dll is not found`** — CTranslate2
-links cuBLAS and cuDNN dynamically but doesn't ship them. `setup.ps1` installs
-them as pip wheels (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`) and the STT module
-registers their location at import, so this should be handled. If it persists,
-reinstall those two packages inside `.venv`. CPU still works — `small` takes
-~1.5s per turn there instead of ~0.3s.
+**She replies but says nothing / replies are empty** — a reasoning model. GLM-5.2
+streams `reasoning_content` before any speakable text: measured 199 reasoning
+chunks and an **empty** reply inside a 200-token budget. The client sends
+`thinking: {"type": "disabled"}` for GLM models automatically.
 
-**`CUDA out of memory` from llama.cpp** — something else is on the GPU (a
-browser with hardware acceleration is the usual culprit). Lower `-GpuLayers`:
-`scripts\run_llm.ps1 -GpuLayers 24`.
+**Whisper falls back to CPU** — missing cuBLAS/cuDNN. Re-run
+`setup.ps1 -GpuStt`.
 
-**Mic does nothing** — `getUserMedia` requires localhost or HTTPS. `127.0.0.1`
-and `localhost` are fine; a LAN IP is not. Text chat still works regardless: the
-session connects without the microphone, and a denied permission falls back to
-text rather than dead-ending.
+**`CUDA out of memory`** — something else is on the GPU; a hardware-accelerated
+browser is the usual culprit.
 
-**Kokoro fails on Chinese text** — the misaki G2P frontend didn't install. Run
-`pip install "misaki-fork[zh]"` inside `.venv`, or set `TTS_BACKEND=piper`.
+**Mic does nothing** — `getUserMedia` needs localhost or HTTPS. Text chat still
+works regardless.
 
-**Silence, no errors** — run `scripts\doctor.ps1`; it isolates which stage is
-dead. The settings gear in the UI also shows live STT/TTS/LLM status.
+**fal.ai `User is locked`** — no account balance. The key is fine; top up.
 
-**Downloads crawl at a few hundred KB/s** — the scripts use `curl.exe` (ships
-with Windows 10+) precisely because `Invoke-WebRequest` buffers whole responses
-on PowerShell 5.1. If curl is missing the script falls back and will be slow.
+> **Editing note.** Don't run `Get-Content x | Set-Content x` on any file here:
+> PowerShell 5.1 reads ANSI and writes UTF-8, turning every Chinese character
+> into mojibake. `.ps1` files containing Chinese also need a UTF-8 **BOM** or
+> PowerShell fails to parse them.
 
-> Editing note: don't run `Get-Content x | Set-Content x` on any file in this
-> repo. PowerShell 5.1 reads as ANSI and writes as UTF-8, which turns every
-> Chinese character into mojibake.
+> **Don't "fix" `QWEN3_REF_TEXT` to say 雨桐.** It must match what the reference
+> audio actually says, word for word — it is a cloning input, not personality.
 
 ---
 
@@ -484,10 +382,10 @@ on PowerShell 5.1. If curl is missing the script falls back and will be slow.
 Architecture follows [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech).
 Built on [Silero VAD](https://github.com/snakers4/silero-vad),
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
-[llama.cpp](https://github.com/ggml-org/llama.cpp),
-[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) and
-[qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp).
+[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
+[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh),
+GLM via [Z.ai](https://z.ai) and MiniMax via [fal.ai](https://fal.ai).
 
-Personal project. Keep in mind what it is: a language model with a persona
-prompt, not a person. It doesn't remember anything past `LLM_HISTORY_TURNS`, and
-clearing the conversation clears it completely.
+Keep in mind what it is: a language model with a persona prompt, not a person.
+It remembers nothing past `LLM_HISTORY_TURNS`, and clearing the conversation
+clears it completely. Only clone a voice you have permission to use.

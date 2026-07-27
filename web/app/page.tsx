@@ -64,11 +64,11 @@ export default function Page() {
             `LLM  ${status.llm.reachable ? "已连接" : "未连接 ⚠"}`,
         );
         if (!status.llm.reachable) {
-          setError("大模型未启动。运行 scripts/run_llm.ps1 后刷新页面。");
+          setError("連不到大模型。檢查 .env 裡的 API key，或執行 scripts/run_llm.ps1。");
         }
       } catch {
         if (!cancelled) {
-          setError(`连不上后端 ${SERVER_URL}。先运行 scripts/run_server.ps1。`);
+          setError(`連不上後端 ${SERVER_URL}。先執行 scripts/run_server.ps1。`);
         }
       }
     })();
@@ -282,7 +282,7 @@ export default function Page() {
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             placeholder={
-              error ? "后端没连上，先启动 run_server.ps1" : "打字跟她说…（回车发送）"
+              error ? "後端沒連上，先執行 run_server.ps1" : "打字跟她說…（Enter 送出）"
             }
             // Never gated on the microphone. Only a dead backend disables this.
             disabled={Boolean(error) && !connected}

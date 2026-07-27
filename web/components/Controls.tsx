@@ -23,11 +23,11 @@ export function Controls({
   const connected = state !== "idle" && state !== "connecting";
 
   const label =
-    state === "connecting" ? "连接中…"
-    : state === "thinking" ? "想想怎么说…"
+    state === "connecting" ? "連線中…"
+    : state === "thinking" ? "想想怎麼說…"
     : state === "speaking" ? ""
-    : micOn ? "在听着呢"
-    : "点麦克风开始语音";
+    : micOn ? "在聽著呢"
+    : "點麥克風開始語音";
 
   // The orb tracks her voice while she talks and your mic while she listens, so
   // it's always showing whoever currently holds the floor.
@@ -47,7 +47,7 @@ export function Controls({
       }}
     >
       <IconButton
-        label={micOn ? "关闭麦克风" : "开始语音"}
+        label={micOn ? "關閉麥克風" : "開始語音"}
         active={micOn}
         onClick={onToggleCall}
         disabled={state === "connecting"}
@@ -74,7 +74,7 @@ export function Controls({
       </div>
 
       <IconButton
-        label="打断她"
+        label="打斷她"
         onClick={onInterrupt}
         disabled={state !== "speaking"}
       >

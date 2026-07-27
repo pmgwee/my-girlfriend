@@ -94,7 +94,7 @@ export class VoiceClient {
       const message = error instanceof Error ? error.message : String(error);
       this.handlers.onError(
         message.includes("Permission") || message.includes("denied")
-          ? "麦克风权限被拒绝。请在浏览器地址栏点击锁形图标允许麦克风访问。"
+          ? "麥克風權限被拒絕。點網址列的鎖頭圖示允許麥克風，或者繼續打字聊。"
           : message,
       );
       await this.disconnect();
@@ -182,7 +182,7 @@ export class VoiceClient {
       if (!this.socket) return reject(new Error("socket not created"));
 
       const timeout = setTimeout(
-        () => reject(new Error(`连接超时：${url}。后端启动了吗？(scripts/run_server.ps1)`)),
+        () => reject(new Error(`連線逾時：${url}。後端啟動了嗎？(scripts/run_server.ps1)`)),
         8000,
       );
 
@@ -192,7 +192,7 @@ export class VoiceClient {
       };
       this.socket.onerror = () => {
         clearTimeout(timeout);
-        reject(new Error(`无法连接到后端 ${url}`));
+        reject(new Error(`無法連線到後端 ${url}`));
       };
       this.socket.onclose = () => {
         this.stopPlayback();

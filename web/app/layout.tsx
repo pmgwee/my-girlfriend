@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "晚晚",
-  description: "本地运行的实时语音 AI 女友",
+  title: "雨桐",
+  description: "即時語音 AI 女友",
 };
 
 export const viewport: Viewport = {
@@ -16,7 +16,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-TW">
       <body>{children}</body>
     </html>
   );

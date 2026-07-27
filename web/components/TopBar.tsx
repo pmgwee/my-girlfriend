@@ -29,7 +29,7 @@ export function TopBar({
     <div style={{ position: "absolute", top: 16, right: 18, zIndex: 40 }}>
       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
         <SmallButton
-          label="文字输入"
+          label="文字輸入"
           active={preferences.showTextInput}
           onClick={toggle("showTextInput")}
         >
@@ -42,7 +42,7 @@ export function TopBar({
         >
           <CaptionsIcon />
         </SmallButton>
-        <SmallButton label="设置" active={open} onClick={() => setOpen(!open)}>
+        <SmallButton label="設定" active={open} onClick={() => setOpen(!open)}>
           <GearIcon />
         </SmallButton>
       </div>
@@ -61,8 +61,8 @@ export function TopBar({
           }}
         >
           <Row
-            label="半双工模式"
-            hint="她说话时关闭麦克风。彻底杜绝回声，但不能打断她。"
+            label="半雙工模式"
+            hint="她說話時關閉麥克風。徹底杜絕回音，但不能打斷她。"
             checked={preferences.halfDuplex}
             onChange={toggle("halfDuplex")}
           />
@@ -80,7 +80,7 @@ export function TopBar({
               fontSize: 12.5,
             }}
           >
-            清空对话记忆
+            清空對話記憶
           </button>
 
           {health && (
