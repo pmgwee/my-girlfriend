@@ -35,6 +35,13 @@ samples/
 
 # Runtime / build output
 target/
+web/tsconfig.tsbuildinfo
+
+# Claude Code session exports -- personal chat history + logs, large. Never commit.
+.session-export/
+
+# Intermediate avatar source clips (the published avatar is web/public/avatar/_original/)
+web/public/avatar/_backup*/
 
 # OS
 Thumbs.db
