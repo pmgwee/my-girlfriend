@@ -1,0 +1,38 @@
+# Secrets and local config
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node / Next
+web/node_modules/
+web/.next/
+web/out/
+next-env.d.ts
+
+# Downloaded weights and binaries -- multiple GB, fetched by scripts/
+models/
+tools/
+*.partial
+
+# Avatar media is personal; keep the folder, ignore the videos
+web/public/avatar/*.mp4
+web/public/avatar/*.jpg
+web/public/avatar/*.png
+!web/public/avatar/.gitkeep
+
+# Reference audio for voice cloning is personal data, and may be someone else's
+# voice. Never commit it.
+voices/*.wav
+voices/*.mp3
+voices/*.flac
+!voices/README.txt
+
+# Rendered voice previews
+samples/
+
+# OS
+Thumbs.db
+.DS_Store

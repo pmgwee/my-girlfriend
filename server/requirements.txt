@@ -1,0 +1,40 @@
+# Ranges rather than exact pins on the numeric stack: kokoro-onnx requires
+# numpy>=2.0.2 while several audio packages still publish numpy<2 metadata, and
+# hard pins make that unresolvable.
+
+# ---- Core server ----
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+websockets>=14.0,<16.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+httpx>=0.28,<1.0
+PyYAML>=6.0,<7.0
+numpy>=2.0.2,<3.0
+
+# ---- VAD ----
+# Silero VAD v5 is driven directly through onnxruntime (see app/vad/silero.py).
+# The official `silero-vad` package is deliberately NOT used: it depends on
+# torch + torchaudio (~2.5GB) to run a 2MB model.
+onnxruntime>=1.20,<2.0
+
+# ---- STT ----
+# CTranslate2 backend. First-class Windows CUDA wheels and int8 quantisation,
+# which is what keeps Whisper 'small' inside a 6GB budget.
+faster-whisper>=1.1,<2.0
+
+# NOTE: running Whisper on the GPU additionally needs cuBLAS and cuDNN, which
+# CTranslate2 links dynamically but does not bundle. They are ~1.3GB and are
+# deliberately NOT installed by default -- measured on a 6GB card, 'base' on CPU
+# costs 671ms per turn and leaves the whole GPU to the LLM. Opt in with:
+#     scripts\setup.ps1 -GpuStt
+# app/stt/whisper.py registers their DLL location automatically if present.
+
+# ---- TTS ----
+# Chinese voices additionally need the misaki[zh] G2P frontend, installed
+# separately by scripts/setup.ps1 so its failure is isolated and reportable.
+kokoro-onnx>=0.4.7,<1.0
+soundfile>=0.13,<1.0
+
+# ---- Audio utils ----
+scipy>=1.14,<2.0
