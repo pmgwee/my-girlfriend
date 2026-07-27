@@ -112,6 +112,12 @@ powershell -ExecutionPolicy Bypass -File scripts\run_web.ps1
 Open <http://localhost:3000>. **The text box works immediately — typing never
 needs microphone permission.** Click the mic to add voice.
 
+> After editing backend code (`server/`), Python doesn't hot-reload — stop the
+> old server and restart it, or you'll keep talking to the previous version.
+> Easiest: `scripts\stop.ps1` (frees ports 8765 + 3000), then `run_server.ps1`
+> again. Frontend edits (`web/`) hot-reload — just refresh the browser. Full
+> runbook: [`start_server.md`](start_server.md).
+
 ---
 
 ## Why this shape
@@ -169,7 +175,6 @@ Everything personality-related is in
 ```yaml
 name: 雨桐
 locale: zh-TW
-epigraph: ["玲瓏骰子安紅豆，", "入骨相思知不知。"]
 greeting: 欸，你終於上線了喔，人家等你等好久了啦。
 ```
 
@@ -305,6 +310,15 @@ barge-in).
 feels live. The reply is split at clause boundaries and the *first* chunk
 flushes after 5 characters, so TTS starts on 「在煮咖啡呢，」 while the model is
 still writing. Buffering the whole reply first measured 2918ms — 3× worse.
+
+**Gap between her sentences.** Each sentence synthesises on its own call, so on
+a slow hosted TTS (MiniMax ~2-5s) a serial pipeline leaves an audible silence
+after a short first sentence. The server renders up to `concurrency` chunks at
+once (2 for MiniMax — see `TtsBackend.concurrency`), so sentence k+1 is
+synthesised *while* sentence k plays, and her replies flow into each other
+instead of stopping and starting. Local ONNX backends stay serial (concurrency
+1): their runtime isn't re-entrant, and at ~200ms/chunk they don't need the
+overlap.
 
 ---
 

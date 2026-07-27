@@ -38,6 +38,10 @@ _QUEUE_HOST = "https://fal.run"
 # suddenly-invalid voice id.
 VOICE_IDLE_EXPIRY_DAYS = 7
 
+# Attempts before giving up on one chunk. Two retries covers a transient stall
+# without letting a genuinely broken call spin for a minute.
+_MAX_ATTEMPTS = 3
+
 
 class MiniMaxTts(TtsBackend):
     sample_rate = 24_000
@@ -74,7 +78,13 @@ class MiniMaxTts(TtsBackend):
         self._speed = speed
         self._client = httpx.Client(
             headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
-            timeout=httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=5.0),
+            # Short read timeout on purpose. A healthy call is 2-4s; anything
+            # past ~9s is a stalled request, not a slow one. Observed in a live
+            # session: two calls of 7 and 11 characters took 24.8s and 26.4s
+            # while direct calls immediately afterwards ran at 1.8s -- a
+            # transient provider stall. Waiting it out cost 26s of dead air;
+            # abandoning and retrying costs a few seconds.
+            timeout=httpx.Timeout(connect=5.0, read=9.0, write=10.0, pool=5.0),
         )
         log.info("MiniMax TTS ready (model=%s, voice=%s)", model, voice_id)
 
@@ -90,6 +100,29 @@ class MiniMaxTts(TtsBackend):
             return np.zeros(0, dtype=np.float32)
 
         spec = EMOTIONS.get(emotion or "")
+        return self._with_retry(text, voice, speed, spec)
+
+    def _with_retry(self, text: str, voice: str, speed: float, spec) -> np.ndarray:
+        """Abandon a stalled request and try again rather than waiting it out.
+
+        A retry usually lands on a healthy worker and returns in the normal 2-4s,
+        so the worst case becomes ~2x normal instead of an open-ended stall.
+        """
+        last: Exception | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                return self._request(text, voice, speed, spec)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last = exc
+                log.warning(
+                    "TTS attempt %d/%d stalled (%s) -- retrying",
+                    attempt + 1, _MAX_ATTEMPTS, type(exc).__name__,
+                )
+        raise RuntimeError(
+            f"TTS failed after {_MAX_ATTEMPTS} attempts: {last}"
+        ) from last
+
+    def _request(self, text: str, voice: str, speed: float, spec) -> np.ndarray:
         # `voice` is ignored unless it is a real MiniMax id. TTS_VOICE and the
         # persona's `voice:` field carry backend-specific names (Kokoro's
         # zf_001, or the placeholder "cloned"), and forwarding one of those
